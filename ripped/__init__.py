@@ -1,0 +1,2 @@
+"""RIPPED package init."""
+
