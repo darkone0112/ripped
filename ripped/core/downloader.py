@@ -49,6 +49,7 @@ def download_with_ytdlp(url: str, format_str: str, output_template: str = "%(tit
         "format": format_str,
         "outtmpl": output_template,
         "quiet": True,
+        "no_warnings": True,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[attr-defined]
         result = ydl.extract_info(url, download=True)
@@ -57,4 +58,3 @@ def download_with_ytdlp(url: str, format_str: str, output_template: str = "%(tit
             "title": result.get("title"),
             "requested_format": format_str,
         }
-

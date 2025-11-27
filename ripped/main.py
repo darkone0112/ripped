@@ -13,9 +13,10 @@ from ripped.config.settings import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_TEMPLATE,
 )
+from ripped.core.converter import convert_to_mp4_in_place, run_bulk_conversion
 from ripped.core.downloader import build_format_string, download_with_ytdlp
 from ripped.core.ffmpeg_tools import convert_to_mp3
-from ripped.utils.logger import log_error, log_info
+from ripped.utils.logger import clear_log_sink, log_error, log_info, set_log_sink
 
 
 EXIT_OK = 0
@@ -39,6 +40,21 @@ def format_quality_label(quality: int | None) -> str:
 
 
 _warned_clipboard = False
+
+def _load_logo() -> str:
+    logo_path = Path(__file__).resolve().parent / "logo.txt"
+    try:
+        return logo_path.read_text(encoding="utf-8").rstrip("\n")
+    except OSError:
+        return "RIPPED"
+
+
+MENU_ART = _load_logo()
+MENU_WIDTH = max(60, max((len(line) for line in MENU_ART.splitlines()), default=0))
+FRAME_EDGE = "▒"
+FRAME_FILL = "░"
+FRAME_PAD = 4
+FRAME_WIDTH = max(MENU_WIDTH + FRAME_PAD, 70)
 
 
 def read_clipboard() -> str | None:
@@ -98,7 +114,18 @@ def perform_download(mode: str, quality: int | None, url: str) -> int:
             return EXIT_FFMPEG_ERROR
         log_info(f"Saved audio to: {mp3_path}")
     else:
-        log_info(f"Saved video to: {downloaded_path}")
+        final_video_path = downloaded_path
+        try:
+            converted_path = convert_to_mp4_in_place(downloaded_path)
+        except FileNotFoundError as exc:
+            log_error(str(exc))
+            return EXIT_FFMPEG_ERROR
+        if converted_path:
+            final_video_path = converted_path
+            log_info(f"Downloaded and converted to: {final_video_path}")
+        else:
+            log_error("Conversion to mp4 failed; keeping original file (may be Resolve-incompatible).")
+            log_info(f"Saved video to: {final_video_path}")
 
     return EXIT_OK
 
@@ -117,6 +144,16 @@ def main(argv: list[str] | None = None) -> int:
         log_error(str(exc))
         return EXIT_USER_ERROR
 
+    if parsed.mode == "convert":
+        if parsed.path is None:
+            log_error("A target path is required for convert mode.")
+            return EXIT_USER_ERROR
+        return run_bulk_conversion(parsed.path)
+
+    if parsed.url is None:
+        log_error("A URL is required for download modes.")
+        return EXIT_USER_ERROR
+
     return perform_download(parsed.mode, parsed.quality, parsed.url)
 
 
@@ -125,54 +162,148 @@ def run_menu() -> int:
     mode = "video"
     quality: int | None = None
     _sentinel = object()
+    status_message = "Ready"
+    status_progress: float | None = None
+    last_feedback = "Awaiting command."
+    log_lines: list[str] = []
+
+    def push_log(level: str, message: str | object) -> None:
+        entry = f"[{level}] {message}"
+        log_lines.append(entry)
+        if len(log_lines) > 8:
+            log_lines.pop(0)
+
+    set_log_sink(push_log)
+
+    def clear_screen() -> None:
+        os.system("cls" if os.name == "nt" else "clear")
+
+    def _border() -> str:
+        return FRAME_EDGE + (FRAME_FILL * (FRAME_WIDTH - 2)) + FRAME_EDGE
+
+    def _row(text: str) -> str:
+        inner = text[: FRAME_WIDTH - 4]
+        return f"{FRAME_EDGE} {inner.ljust(FRAME_WIDTH - 4)} {FRAME_EDGE}"
+
+    def _row_center(text: str) -> str:
+        inner = text[: FRAME_WIDTH - 4]
+        return f"{FRAME_EDGE} {inner.center(FRAME_WIDTH - 4)} {FRAME_EDGE}"
+
+    def _progress(label: str, ratio: float = 0.0) -> str:
+        ratio = max(0.0, min(1.0, ratio))
+        bar_width = max(FRAME_WIDTH - len(label) - 12, 10)
+        filled = int(bar_width * ratio)
+        empty = max(bar_width - filled, 0)
+        bar = (FRAME_EDGE * filled) + (FRAME_FILL * empty)
+        text = f"{label}: [{bar}] {int(ratio*100):3d}%"
+        return _row(text)
 
     def banner() -> None:
-        print("\n================ R I P P E D ================")
-        print(f" Mode: {mode:<8} | Quality: {format_quality_label(quality)}")
+        clear_screen()
+        print(MENU_ART)
+        print(_border())
+        print(_row_center("RIPPED CONTROL DECK"))
+        print(_row(f"Mode: {mode:<8} | Quality: {format_quality_label(quality)}"))
+        print(_row(f"Status: {status_message}"))
+        if status_progress is not None:
+            print(_progress("Activity", status_progress))
+        print(_border())
 
-    while True:
-        banner()
-        print("1) Download single URL")
-        print("2) Bulk download (enter URLs, 'q' to finish)")
-        print("3) Change mode")
-        print("4) Change quality")
-        print("5) Exit")
+    try:
+        while True:
+            banner()
+            print(_row_center("MAIN MENU"))
+            print(_row("1) Download single URL"))
+            print(_row("2) Bulk download (enter URLs, 'q' to finish)"))
+            print(_row("3) Convert existing videos to MP4"))
+            print(_row("4) Change mode"))
+            print(_row("5) Change quality"))
+            print(_row("6) Exit"))
+            print(_border())
+            print(_row_center("LAST ACTION"))
+            for line in last_feedback.splitlines() or [""]:
+                print(_row(line))
+            print(_border())
+            print(_row_center("SESSION LOG"))
+            if log_lines:
+                for line in log_lines:
+                    print(_row(line))
+            else:
+                print(_row("No log messages yet."))
+            print(_border())
+            print(_row_center("SELECT OPTION"))
+            print(_border())
 
-        choice = input("\nSelect option: ").strip()
+            choice = input("> ").strip()
 
-        if choice == "1":
-            url = prompt_for_url()
-            if not url:
-                print("No URL provided.")
-                continue
-            exit_code = perform_download(mode, quality, url)
-            if exit_code != EXIT_OK:
-                print(f"Download finished with exit code {exit_code}")
-        elif choice == "2":
-            urls = prompt_bulk_urls()
-            if not urls:
-                print("No URLs provided.")
-                continue
-            print(f"\nQueued {len(urls)} URLs. Starting downloads...")
-            for idx, url in enumerate(urls, start=1):
-                print(f"[{idx}/{len(urls)}] {url}")
+            if choice == "1":
+                url = prompt_for_url()
+                if not url:
+                    print("No URL provided.")
+                    continue
+                status_message = "Downloading..."
+                status_progress = 0.0
                 exit_code = perform_download(mode, quality, url)
                 if exit_code != EXIT_OK:
-                    print(f"  -> Failed with exit code {exit_code}")
-            print("Bulk download complete.")
-        elif choice == "3":
-            selected = prompt_mode()
-            if selected:
-                mode = selected
-        elif choice == "4":
-            selected_quality = prompt_quality(_sentinel)
-            if selected_quality is not _sentinel:
-                quality = selected_quality
-        elif choice == "5":
-            print("Goodbye.")
-            return EXIT_OK
-        else:
-            print("Invalid choice. Please select 1-5.")
+                    print(f"Download finished with exit code {exit_code}")
+                    last_feedback = f"Download finished with exit code {exit_code}"
+                else:
+                    last_feedback = f"Download complete\nURL: {url}"
+                status_message = "Ready"
+                status_progress = None
+            elif choice == "2":
+                urls = prompt_bulk_urls()
+                if not urls:
+                    print("No URLs provided.")
+                    continue
+                print(f"\nQueued {len(urls)} URLs. Starting downloads...")
+                for idx, url in enumerate(urls, start=1):
+                    print(f"[{idx}/{len(urls)}] {url}")
+                    status_message = f"Downloading {idx}/{len(urls)}..."
+                    status_progress = idx / len(urls)
+                    exit_code = perform_download(mode, quality, url)
+                    if exit_code != EXIT_OK:
+                        print(f"  -> Failed with exit code {exit_code}")
+                print("Bulk download complete.")
+                last_feedback = f"Bulk download complete ({len(urls)} items)."
+                status_message = "Ready"
+                status_progress = None
+            elif choice == "3":
+                target = input("Enter file or directory to convert: ").strip()
+                if not target:
+                    print("No path provided.")
+                    continue
+                if not Path(target).expanduser().resolve().exists():
+                    print("Path does not exist.")
+                    continue
+                status_message = "Converting..."
+                status_progress = 0.0
+                exit_code = run_bulk_conversion(target)
+                if exit_code != EXIT_OK:
+                    print(f"Conversion finished with exit code {exit_code}")
+                    last_feedback = f"Conversion finished with exit code {exit_code}"
+                else:
+                    last_feedback = f"Conversion complete\nPath: {target}"
+                status_message = "Ready"
+                status_progress = None
+            elif choice == "4":
+                selected = prompt_mode()
+                if selected:
+                    mode = selected
+                    last_feedback = f"Mode set to {mode}"
+            elif choice == "5":
+                selected_quality = prompt_quality(_sentinel)
+                if selected_quality is not _sentinel:
+                    quality = selected_quality
+                    last_feedback = f"Quality set to {format_quality_label(quality)}"
+            elif choice == "6":
+                print("Goodbye.")
+                return EXIT_OK
+            else:
+                print("Invalid choice. Please select 1-6.")
+                last_feedback = "Invalid choice."
+    finally:
+        clear_log_sink()
 
 
 def prompt_for_url() -> str | None:

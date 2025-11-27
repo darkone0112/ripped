@@ -325,3 +325,13 @@ Optional:
 
 ────────────────────────
 
+
+13. MP4 Compatibility Layer
+---------------------------
+
+Goal: ensure everything lands as Resolve-friendly .mp4 with AAC audio.
+
+[ ] Add CLI mode ipped convert <path> to scan a file or directory (recursive) for .webm/.mkv, convert each to .mp4 in-place, and delete originals on success.  
+[ ] Hook conversion into download flows so single and bulk downloads automatically run the converter after each item.  
+[ ] Handle ffmpeg absence gracefully (clear error), and log per-file results plus a summary counter.  
+[ ] Document the new mode and auto-conversion behavior in README with examples.
